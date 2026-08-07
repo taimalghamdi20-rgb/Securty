@@ -173,18 +173,14 @@ function extractUserId(message, args) {
   return null;
 }
 
-const ANSI_ORANGE = '\u001b[0;33m';
-const ANSI_RESET = '\u001b[0m';
-
 function buildHelpEmbeds() {
   const e = new EmbedBuilder()
-    .setTitle('أوامر الحماية')
+    .setTitle('📖 أوامر الحماية')
     .setColor(COLOR)
     .setDescription('كل أمر يُستخدم بوضع علامة **#** قبله مباشرةً، مثال: `#protection`')
     .setTimestamp();
   for (const cat of CATEGORIES) {
-    const lines = cat.commands.map(([cmd, desc]) => `${cmd} : ${ANSI_ORANGE}${desc}${ANSI_RESET}`).join('\n');
-    const value = '```ansi\n' + lines + '\n```';
+    const value = cat.commands.map(([cmd, desc]) => `\`${cmd}\` : ${desc}`).join('\n');
     e.addFields({ name: cat.title, value });
   }
   return e;
