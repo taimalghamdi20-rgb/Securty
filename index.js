@@ -14,8 +14,18 @@ const {
   SlashCommandBuilder
 } = require('discord.js');
 
+const http = require('http');
 const db = require('./db');
 const { CATEGORIES } = require('./help');
+
+// سيرفر HTTP بسيط جدًا فقط عشان استضافات مثل Render (Web Service) تعتبر البوت "شغّال"
+// (لا علاقة له بوظائف البوت نفسه)
+http
+  .createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('البوت شغّال ✅');
+  })
+  .listen(process.env.PORT || 3000);
 
 const PREFIX = '#';
 const COLOR = 0x2b2d31;
@@ -569,7 +579,11 @@ client.once(Events.ClientReady, async () => {
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
   if (interaction.commandName === 'help') {
-    await interaction.reply({ embeds: [buildHelpEmbeds()] });
+    try {
+      await interaction.reply({ embeds: [buildHelpEmbeds()] });
+    } catch (err) {
+      console.error('فشل الرد على تفاعل /help:', err?.message || err);
+    }
   }
 });
 
@@ -767,6 +781,14 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
     guildData.memberRoleSnapshots[newMember.id] = [...newMember.roles.cache.keys()].filter((id) => id !== newMember.guild.id);
     db.setGuild(guildId, guildData);
   }
+});
+
+// شبكة أمان: أي خطأ غير متوقع بأي مكان بالكود يُسجَّل فقط ولا يوقف تشغيل البوت
+process.on('unhandledRejection', (err) => {
+  console.error('❗ Unhandled Rejection:', err?.message || err);
+});
+process.on('uncaughtException', (err) => {
+  console.error('❗ Uncaught Exception:', err?.message || err);
 });
 
 client.login(process.env.TOKEN);
