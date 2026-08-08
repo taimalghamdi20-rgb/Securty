@@ -39,16 +39,21 @@ function defaultGuildData() {
     // #trust / #trustlist — يخطون الحماية بالكامل
     trusted: [],
 
-    // #createlimit / #dlimit
-    limitsEnabled: false,
-    limits: { count: 3, seconds: 10 },
+    // #createlimit / #dlimit + الحدود من الداشبورد
+    limitsEnabled: true,
+    limits: { banKick: 3, roles: 3, channels: 3, seconds: 60 },
 
     // #procedure  -> 'strip' | 'kick' | 'ban' | 'jail'
     procedure: 'strip',
     jailRoleId: null,
 
-    // #antidelete — حماية حذف الرولات/الرومات/الكاتقوري
+    // #antidelete — حماية حذف الرولات/الرومات/الكاتقوري (المفتاح الرئيسي لحماية التخريب)
     antiDelete: true,
+    // حماية فورية (تنفيذ الإجراء من أول مخالفة) لكل تصنيف على حدة — من الداشبورد
+    instantRoomAction: false, // حماية الرومات الفورية
+    instantRoleAction: false, // حماية الرولات الفورية (إنشاء/حذف/تعديل)
+    antiGuildUpdate: false, // حماية إعدادات السيرفر (الاسم/الصورة)
+    antiPermissions: false, // حماية الصلاحيات (تعديلات صلاحيات الرومات/الرولات)
 
     // #antijoin / #setjoin
     antiJoin: false,
@@ -84,19 +89,25 @@ function defaultGuildData() {
     fullBackup: null,
     memberRoleSnapshots: {},
 
-    // تتبع المخالفات المؤقت (لا يُحفظ بشكل دائم فعليًا لكنه موجود بالـ DB لتبسيط الأمر)
-    violations: {}
+    // تتبع المخالفات لكل تصنيف: channels / roles / banKick / permissions / guildUpdate
+    violations: { channels: {}, roles: {}, banKick: {}, permissions: {}, guildUpdate: {} }
   };
 }
 
 function getGuild(guildId) {
   const db = load();
+  const defaults = defaultGuildData();
   if (!db[guildId]) {
-    db[guildId] = defaultGuildData();
+    db[guildId] = defaults;
     save();
   } else {
-    // دمج أي حقول جديدة أضيفت لاحقًا بدون فقدان بيانات قديمة
-    db[guildId] = Object.assign(defaultGuildData(), db[guildId]);
+    const merged = Object.assign({}, defaults, db[guildId]);
+    // دمج الحقول المتداخلة (limits/backups/violations) بشكل عميق حتى لا تنكسر البيانات القديمة
+    merged.limits = Object.assign({}, defaults.limits, db[guildId].limits || {});
+    merged.violations = Object.assign({}, defaults.violations, db[guildId].violations || {});
+    merged.backups = Object.assign({}, defaults.backups, db[guildId].backups || {});
+    merged.spamLimit = Object.assign({}, defaults.spamLimit, db[guildId].spamLimit || {});
+    db[guildId] = merged;
   }
   return db[guildId];
 }
