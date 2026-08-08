@@ -14,18 +14,8 @@ const {
   SlashCommandBuilder
 } = require('discord.js');
 
-const http = require('http');
 const db = require('./db');
 const { CATEGORIES } = require('./help');
-
-// سيرفر HTTP بسيط جدًا فقط عشان استضافات مثل Render (Web Service) تعتبر البوت "شغّال"
-// (لا علاقة له بوظائف البوت نفسه)
-http
-  .createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
-    res.end('البوت شغّال ✅');
-  })
-  .listen(process.env.PORT || 3000);
 
 const PREFIX = '#';
 const COLOR = 0x2b2d31;
@@ -129,32 +119,44 @@ async function applyPunishment(guild, userId, reason, guildData) {
   }
 }
 
-async function handleViolation(guild, guildId, executorId, reason) {
+// حدود كل تصنيف (channels/roles/banKick تُقرأ من guildData.limits، permissions وguildUpdate ثابتة)
+function categoryLimit(guildData, category) {
+  if (category === 'channels') return guildData.limits.channels;
+  if (category === 'roles' || category === 'permissions') return guildData.limits.roles;
+  if (category === 'banKick') return guildData.limits.banKick;
+  return 1; // guildUpdate وأي تصنيف آخر: مخالفة واحدة تكفي
+}
+
+async function handleViolation(guild, guildId, category, executorId, reason, instant = false) {
   let guildData = db.getGuild(guildId);
   if (executorId === client.user.id) return;
   if (isTrusted(guildData, executorId) || isBypassDelete(guildData, executorId)) return;
 
-  if (guildData.limitsEnabled) {
+  const useInstant = instant || !guildData.limitsEnabled;
+  const limit = categoryLimit(guildData, category);
+
+  if (!useInstant) {
     const now = Date.now();
-    const windowMs = guildData.limits.seconds * 1000;
-    const v = guildData.violations[executorId] || { count: 0, first: now };
+    const windowMs = (guildData.limits.seconds || 60) * 1000;
+    if (!guildData.violations[category]) guildData.violations[category] = {};
+    const v = guildData.violations[category][executorId] || { count: 0, first: now };
     if (now - v.first > windowMs) {
       v.count = 0;
       v.first = now;
     }
     v.count++;
-    guildData.violations[executorId] = v;
+    guildData.violations[category][executorId] = v;
     db.setGuild(guildId, guildData);
 
-    if (v.count < guildData.limits.count) {
+    if (v.count < limit) {
       await sendLog(
         guild,
         guildData,
-        embed('⚠️ مخالفة', `${reason}\nالمنفذ: <@${executorId}>\nعدد المخالفات: ${v.count}/${guildData.limits.count}`, 0xf1c40f)
+        embed('⚠️ مخالفة', `${reason}\nالمنفذ: <@${executorId}>\nعدد المخالفات: ${v.count}/${limit}`, 0xf1c40f)
       );
       return;
     }
-    guildData.violations[executorId] = { count: 0, first: now };
+    guildData.violations[category][executorId] = { count: 0, first: now };
   }
 
   db.setGuild(guildId, guildData);
@@ -264,10 +266,10 @@ const commands = {
     const count = parseInt(args[0]);
     const seconds = parseInt(args[1]);
     if (!count || !seconds) {
-      return message.reply({ embeds: [embed('❌ الاستخدام', '`#createlimit <عدد المخالفات> <عدد الثواني>`\nمثال: `#createlimit 3 10`', 0xed4245)] });
+      return message.reply({ embeds: [embed('❌ الاستخدام', '`#createlimit <عدد المخالفات> <عدد الثواني>`\nمثال: `#createlimit 3 10`\n(يضبط حد الرومات/الرولات/الباند والكيك معًا — لضبط كل تصنيف على حدة استخدم الداشبورد)', 0xed4245)] });
     }
     guildData.limitsEnabled = true;
-    guildData.limits = { count, seconds };
+    guildData.limits = { channels: count, roles: count, banKick: count, seconds };
     db.setGuild(guildId, guildData);
     await message.reply({ embeds: [embed('📏 تم تحديد الحدود', `سيتم تنفيذ الإجراء بعد **${count}** مخالفات خلال **${seconds}** ثانية.`)] });
   },
@@ -724,10 +726,9 @@ client.on(Events.ChannelDelete, async (channel) => {
   db.setGuild(guildId, guildData);
 
   if (!guildData.protectionEnabled || !guildData.antiDelete) return;
-  const auditType = channel.type === ChannelType.GuildCategory ? AuditLogEvent.ChannelDelete : AuditLogEvent.ChannelDelete;
-  const executor = await fetchExecutor(channel.guild, auditType, channel.id);
+  const executor = await fetchExecutor(channel.guild, AuditLogEvent.ChannelDelete, channel.id);
   if (!executor) return;
-  await handleViolation(channel.guild, guildId, executor.id, `حذف روم: **${channel.name}**`);
+  await handleViolation(channel.guild, guildId, 'channels', executor.id, `حذف روم: **${channel.name}**`, guildData.instantRoomAction);
 });
 
 client.on(Events.GuildRoleDelete, async (role) => {
@@ -748,7 +749,102 @@ client.on(Events.GuildRoleDelete, async (role) => {
   if (!guildData.protectionEnabled || !guildData.antiDelete) return;
   const executor = await fetchExecutor(role.guild, AuditLogEvent.RoleDelete, role.id);
   if (!executor) return;
-  await handleViolation(role.guild, guildId, executor.id, `حذف رول: **${role.name}**`);
+  await handleViolation(role.guild, guildId, 'roles', executor.id, `حذف رول: **${role.name}**`, guildData.instantRoleAction);
+});
+
+client.on(Events.GuildRoleCreate, async (role) => {
+  const guildData = db.getGuild(role.guild.id);
+  if (!guildData.protectionEnabled || !guildData.instantRoleAction) return;
+  const executor = await fetchExecutor(role.guild, AuditLogEvent.RoleCreate, role.id);
+  if (!executor) return;
+  if (executor.id === client.user.id || isTrusted(guildData, executor.id) || isBypassDelete(guildData, executor.id)) return;
+  await role.delete('إنشاء رول غير مصرح به').catch(() => {});
+  await handleViolation(role.guild, role.guild.id, 'roles', executor.id, `إنشاء رول غير مصرح به: **${role.name}**`, true);
+});
+
+client.on(Events.GuildRoleUpdate, async (oldRole, newRole) => {
+  const guildData = db.getGuild(newRole.guild.id);
+  if (!guildData.protectionEnabled) return;
+  const permsChanged = !oldRole.permissions.equals(newRole.permissions);
+  const otherChanged =
+    oldRole.name !== newRole.name || oldRole.color !== newRole.color || oldRole.hoist !== newRole.hoist || oldRole.mentionable !== newRole.mentionable;
+  if (!permsChanged && !otherChanged) return;
+  if (!guildData.antiPermissions && !guildData.instantRoleAction) return;
+
+  const executor = await fetchExecutor(newRole.guild, AuditLogEvent.RoleUpdate, newRole.id);
+  if (!executor || executor.id === client.user.id) return;
+  if (isTrusted(guildData, executor.id) || isBypassDelete(guildData, executor.id)) return;
+
+  if (permsChanged && guildData.antiPermissions) {
+    await newRole.setPermissions(oldRole.permissions, 'استرجاع تعديل صلاحيات غير مصرح به').catch(() => {});
+    await handleViolation(newRole.guild, newRole.guild.id, 'permissions', executor.id, `تعديل صلاحيات الرول: **${newRole.name}**`, false);
+  } else if (otherChanged && guildData.instantRoleAction) {
+    await newRole
+      .edit({ name: oldRole.name, color: oldRole.color, hoist: oldRole.hoist, mentionable: oldRole.mentionable }, 'استرجاع تعديل غير مصرح به')
+      .catch(() => {});
+    await handleViolation(newRole.guild, newRole.guild.id, 'roles', executor.id, `تعديل الرول: **${newRole.name}**`, true);
+  }
+});
+
+client.on(Events.ChannelUpdate, async (oldChannel, newChannel) => {
+  if (!newChannel.guild) return;
+  const guildData = db.getGuild(newChannel.guild.id);
+  if (!guildData.protectionEnabled || !guildData.antiPermissions) return;
+  const oldOw = JSON.stringify(serializeOverwrites(oldChannel));
+  const newOw = JSON.stringify(serializeOverwrites(newChannel));
+  if (oldOw === newOw) return;
+
+  const executor =
+    (await fetchExecutor(newChannel.guild, AuditLogEvent.ChannelOverwriteUpdate, newChannel.id)) ||
+    (await fetchExecutor(newChannel.guild, AuditLogEvent.ChannelOverwriteCreate, newChannel.id));
+  if (!executor || executor.id === client.user.id) return;
+  if (isTrusted(guildData, executor.id) || isBypassDelete(guildData, executor.id)) return;
+
+  try {
+    await newChannel.permissionOverwrites.set(
+      oldChannel.permissionOverwrites.cache.map((ow) => ({ id: ow.id, type: ow.type, allow: ow.allow, deny: ow.deny })),
+      'استرجاع تعديل صلاحيات غير مصرح به'
+    );
+  } catch {
+    /* تجاهل */
+  }
+  await handleViolation(newChannel.guild, newChannel.guild.id, 'permissions', executor.id, `تعديل صلاحيات روم: **${newChannel.name}**`, false);
+});
+
+client.on(Events.GuildUpdate, async (oldGuild, newGuild) => {
+  const guildData = db.getGuild(newGuild.id);
+  if (!guildData.protectionEnabled || !guildData.antiGuildUpdate) return;
+  if (oldGuild.name === newGuild.name && oldGuild.icon === newGuild.icon) return;
+
+  const executor = await fetchExecutor(newGuild, AuditLogEvent.GuildUpdate, newGuild.id);
+  if (!executor || executor.id === client.user.id) return;
+  if (isTrusted(guildData, executor.id) || isBypassDelete(guildData, executor.id)) return;
+
+  try {
+    if (oldGuild.name !== newGuild.name) await newGuild.setName(oldGuild.name, 'استرجاع تعديل غير مصرح به');
+    if (oldGuild.icon !== newGuild.icon) await newGuild.setIcon(oldGuild.iconURL({ size: 1024 }) || null, 'استرجاع تعديل غير مصرح به');
+  } catch {
+    /* تجاهل */
+  }
+  await handleViolation(newGuild, newGuild.id, 'guildUpdate', executor.id, 'تعديل إعدادات السيرفر (الاسم/الصورة)', true);
+});
+
+client.on(Events.GuildBanAdd, async (ban) => {
+  const guildData = db.getGuild(ban.guild.id);
+  if (!guildData.protectionEnabled) return;
+  const executor = await fetchExecutor(ban.guild, AuditLogEvent.MemberBanAdd, ban.user.id);
+  if (!executor || executor.id === client.user.id) return;
+  if (isTrusted(guildData, executor.id) || isBypassDelete(guildData, executor.id)) return;
+  await handleViolation(ban.guild, ban.guild.id, 'banKick', executor.id, `تم حظر العضو: **${ban.user.tag}**`, false);
+});
+
+client.on(Events.GuildMemberRemove, async (member) => {
+  const guildData = db.getGuild(member.guild.id);
+  if (!guildData.protectionEnabled) return;
+  const executor = await fetchExecutor(member.guild, AuditLogEvent.MemberKick, member.id);
+  if (!executor || executor.id === client.user.id) return;
+  if (isTrusted(guildData, executor.id) || isBypassDelete(guildData, executor.id)) return;
+  await handleViolation(member.guild, member.guild.id, 'banKick', executor.id, `تم طرد العضو: **${member.user.tag}**`, false);
 });
 
 client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
@@ -768,7 +864,7 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
     const executor = await fetchExecutor(newMember.guild, AuditLogEvent.MemberRoleUpdate, newMember.id);
     if (executor && executor.id !== client.user.id && !isTrusted(guildData, executor.id) && !isBypassDelete(guildData, executor.id)) {
       await newMember.roles.set([...oldRoles], 'استرجاع تعديل غير مصرح به على رول محمي').catch(() => {});
-      await handleViolation(newMember.guild, guildId, executor.id, 'تعديل غير مصرح به على رول محمي');
+      await handleViolation(newMember.guild, guildId, 'roles', executor.id, 'تعديل غير مصرح به على رول محمي', true);
       return;
     }
   }
@@ -786,5 +882,9 @@ process.on('unhandledRejection', (err) => {
 process.on('uncaughtException', (err) => {
   console.error('❗ Uncaught Exception:', err?.message || err);
 });
+
+// تشغيل داشبورد الويب — يستخدم نفس الـ client ونفس ملف البيانات، فأي تغيير من الداشبورد
+// ينعكس فورًا على سلوك البوت والعكس صحيح
+require('./dashboard/app')(client);
 
 client.login(process.env.TOKEN);
